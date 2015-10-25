@@ -1,0 +1,166 @@
+---
+title: 'Practical Machine Learning: A Predictive Model for Exercise Detection from
+  Biometric Data'
+author: "Michael Primm"
+date: "October 24, 2015"
+output: html_document
+---
+
+# Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+# Data
+
+The training data for this project are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. 
+
+# Goals
+
+The goal of this project is to predict the manner in which they did the exercise, as represented by the **classe** variable in the training set.  All other variables will be considered for producing the model.
+
+# Loading and Preparing Data
+
+First, the training and test data needs to be acquired and processed from the source URL.  We will not be using the test data until we are validating the final model, but will be partitioning the training data to evaluate the different models that will be considered.  This is critical to allow the testing data to be properly used to evaluate the actual performance of the model, as measured by the out-of-sample error rate.
+
+```{r cache=TRUE}
+training <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+testing <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+```
+
+We can quickly determine that there are `r ncol(training)` columns in the training data, which suggests that it is likely that many of these are likely not necessary for the model.  To confirm this, we do a near zero variance test, and remove all the columns for which this is true:
+
+```{r}
+library(caret)
+nzv <- nearZeroVar(training)
+train2 <- training[, -nzv]
+```
+
+This process removes `r length(nzv)` columns, significantly simplifying our data set.
+
+Next, several of the columns HAVE variance, but not relevant ones: **X**, **user_name**, **raw_timestamp_part_1**, **raw_timestamp_part_2**, and **cvtd_timestamp** are all variable but more than likely irrelevant to the predictive model, so we will remove them, as well.  We also remove **num_window**, as this is an index that also generates false variability without being reasonably useful for true prediction.
+
+```{r}
+badcols <- c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "num_window")
+train2 <- train2[, !(colnames(train2) %in% badcols)]
+```
+
+Finally, an examination of the data confirms that many of the columns are rich in NA values, which will also reduce their utility in any resulting model.  To reduce this impact, we will determine which columns are missing more than 50% of their values, and remove them from consideration:
+
+```{r}
+pNull <- sapply(train2, function(column) mean(is.na(column)))
+tooNull <- colnames(train2)[pNull > 0.5]
+train3 <- train2[, !(colnames(train2) %in% tooNull)]
+```
+
+This has reduced us to `r length(colnames(train3))` columns which are both value and variability rich.
+
+Next, we will split the training set into a 70% training and 30% testing set for developing our model, allowing the testing data to remain for final out-of-sample error calculation:
+
+```{r}
+set.seed(1296)
+intrain <- createDataPartition(train3$classe, p=0.7)
+train4 <- train3[intrain[[1]],]
+test4 <- train3[-intrain[[1]],]
+```
+# Model generation and evaluation
+
+Now that the data is prepared, we will proceed on to generate a random forest model, based on the 70% subset of the training data.  First, we will preprocess the data, to scale and center the data properly.  We use the scaling for the training data to process the test data, so that we do not bias the test results.
+
+```{r}
+preProc <- preProcess(train4)
+preProc
+train4SC <- predict(preProc, train4)
+test4SC <- predict(preProc, test4)
+```
+
+Finally, we use the centered and scaled training data to generate our model, using Random Forest (run multicore using doParallel library, as this is REALLY slow otherwise).  We will do a 5-way K-fold cross valaidation with 10 repeats to refine the model.
+
+```{r cache=TRUE}
+library(doParallel)
+set.seed(12345)
+seeds <- vector(mode = "list", length = 51)
+for(i in 1:50) seeds[[i]] <- sample.int(1000, 22)
+## For the last model:
+seeds[[51]] <- sample.int(1000, 1)
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+trainCtl <- trainControl(allowParallel=TRUE, method="cv", number=4, repeats=10, seeds=seeds)
+model <- train(train4$classe ~ ., data=train4SC, method="rf", trControl = trainCtl)
+stopCluster(cl)
+model$finalModel
+```
+
+# In-sample Error from Model
+Now, we evaluate our resulting model on our training set, to establish the in-sample error - this should be low, since the model is based on this error.
+
+```{r}
+rslt <- predict(model, train4SC, verbose=FALSE)
+cmtrain4 <- confusionMatrix(rslt, train4SC$classe)
+cmtrain4
+```
+
+The results are very good, as expected, with an accuracy of `r cmtrain4$overall["Accuracy"]`, and a 95% confidence interval lower bound on the accuacy of `r cmtrain4$overall["AccuracyLower"]`.
+
+# Out-of-sample Error from Model
+
+Next, we can evaluate the model using the portion of the original training data that we carved out.  Since this data has never been used while producing the model, it will give us a good view of the out-of-sample error rate we can expect with the *true* test data:
+
+```{r}
+rslt <- predict(model, test4SC, verbose=FALSE)
+cmtest4 <- confusionMatrix(rslt, test4SC$classe)
+cmtest4
+```
+
+Once again, the results are very good, as expected, with an accuracy of `r cmtest4$overall["Accuracy"]`, and a 95% confidence interval lower bound on the accuacy of `r cmtest4$overall["AccuracyLower"]`.
+
+# Evaluation of Model Variable Selection
+
+As a sanity check on the model produced, it is important to consider the variables selected by the model algorithm.  This can be critical, as including variables in the analysis that offer high variability versus the outcome, but are fundamentally poor predictors by their nature, can yield the worst kinds of overfitting.  For example, earlier models produced during this project failed to exclude the **X** and **user_name** columns, both of which are worthless data for future predictions, and the resulting generated models rated them as among the most important data.  For our model, the most important attributes include:
+
+```{r}
+varImpPlot(model$finalModel, n.var=10, main="Top 10 Model Variable By Importance")
+```
+
+An examination of the variables of importance from the generated model matches expectations - all variables are appropriate physical indicators versus row sensitive identity data.
+
+Showing graphs of the most important attributes, colored by outcome.  The grouping of related outcomes, when graphed by these attributes with scaling and centering applied, supports their effectiveness:
+
+```{r}
+library(ggplot2)
+library(grid)
+library(gridExtra)
+p1 <- qplot(roll_belt, yaw_belt, col=classe, data=train4SC)
+p2 <- qplot(magnet_dumbbell_z, magnet_dumbbell_y, col=classe, data=train4SC)
+p3 <- qplot(pitch_belt, pitch_forearm, col=classe, data=train4SC)
+p4 <- qplot(magnet_dumbbell_x, roll_forearm, col=classe, data=train4SC)
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+
+It is also clear, visually, how the most important variables yield the most apparent and easily leveraged groupings, while the groupings become more diffuse as less important variables are considered.
+
+# Predictions for Test Data
+
+Finally, we apply the preprocessing to the *original* test data, and produce and evaluate the corresponding predictions:
+
+```{r}
+testingSC <- predict(preProc, testing)
+rslt <- predict(model, testingSC, verbose=FALSE)
+rslt
+```
+
+We then store this data in files to simplify submission of the predictions.
+```{r}
+rslt <- as.character(rslt)
+pml_write_files <- function(x) {
+  n <- length(x)
+  for(i in 1:n) {
+    filename <- paste0("answers/problem_id_", i, ".txt")
+    write.table(x[i], file=filename, quote=F, row.names=F, col.names=F)
+  }
+}
+pml_write_files(rslt)
+```
